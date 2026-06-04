@@ -11,11 +11,18 @@ export default async function FinancesPage() {
     { data: encaissements },
     { data: bilans },
     { data: reservations },
+    { data: reservationsCautions },
   ] = await Promise.all([
     supabase.from('depenses').select('*').order('date_depense', { ascending: false }),
     supabase.from('encaissements').select('*').order('date_encaissement', { ascending: false }),
     supabase.from('bilans_mensuels').select('*').order('mois', { ascending: false }),
     supabase.from('reservations').select('id, locataire_nom, logement').order('date_arrivee', { ascending: false }),
+    // Réservations avec caution encaissée pour l'onglet cautions
+    supabase.from('reservations')
+      .select('id, locataire_nom, logement, caution_montant, caution_encaissee, caution_restituee, date_restitution, date_arrivee')
+      .eq('caution_encaissee', true)
+      .gt('caution_montant', 0)
+      .order('date_arrivee', { ascending: false }),
   ]);
 
   return (
@@ -25,6 +32,7 @@ export default async function FinancesPage() {
         encaissements={encaissements ?? []}
         bilans={bilans ?? []}
         reservations={reservations ?? []}
+        reservationsCautions={reservationsCautions ?? []}
       />
     </div>
   );

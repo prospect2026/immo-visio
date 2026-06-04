@@ -15,6 +15,8 @@ export interface Reservation {
   montant: number;
   caution_montant: number;
   caution_encaissee: boolean;
+  caution_restituee: boolean;
+  date_restitution: string | null;
   statut: ReservationStatut;
   notes: string | null;
   created_by: string;

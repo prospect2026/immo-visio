@@ -6,24 +6,38 @@ import { useRouter } from 'next/navigation';
 import type { Depense, Encaissement, BilanMensuel, DepenseCategorie } from '@/types/database';
 import { formatFCFA, formatDate, formatDateISO } from '@/lib/utils';
 import { PRET_MENSUEL, REMUNERATION_ASSOCIE } from '@/types/database';
+import { BoutonExportPDF } from './export-bilan-pdf';
 
 const categories: DepenseCategorie[] = [
   'loyer bailleresse', 'internet', 'ménage', 'gaz',
   'entretien clim', 'transport', 'imprévus', 'réparation', 'autre',
 ];
 
-type Onglet = 'depenses' | 'encaissements' | 'bilans';
+type Onglet = 'depenses' | 'encaissements' | 'bilans' | 'cautions';
+
+interface CautionRow {
+  id: string;
+  locataire_nom: string;
+  logement: string;
+  caution_montant: number;
+  caution_encaissee: boolean;
+  caution_restituee: boolean;
+  date_restitution: string | null;
+  date_arrivee: string;
+}
 
 export function FinancesClient({
   depenses,
   encaissements,
   bilans,
   reservations,
+  reservationsCautions,
 }: {
   depenses: Depense[];
   encaissements: Encaissement[];
   bilans: BilanMensuel[];
   reservations: { id: string; locataire_nom: string; logement: string }[];
+  reservationsCautions: CautionRow[];
 }) {
   const [onglet, setOnglet] = useState<Onglet>('depenses');
   const [showFormDepense, setShowFormDepense] = useState(false);
@@ -34,6 +48,7 @@ export function FinancesClient({
     { id: 'depenses', label: 'Dépenses' },
     { id: 'encaissements', label: 'Encaissements' },
     { id: 'bilans', label: 'Bilans' },
+    { id: 'cautions', label: 'Cautions' },
   ];
 
   return (
@@ -94,10 +109,17 @@ export function FinancesClient({
           <ListeBilans bilans={bilans} />
         </div>
       )}
+
+      {onglet === 'cautions' && (
+        <ListeCautions cautions={reservationsCautions} />
+      )}
     </div>
   );
 }
 
+/* ============================================================
+   Formulaire dépense
+   ============================================================ */
 function FormulaireDepense({ onDone }: { onDone: () => void }) {
   const supabase = createClient();
   const router = useRouter();
@@ -170,6 +192,9 @@ function FormulaireDepense({ onDone }: { onDone: () => void }) {
   );
 }
 
+/* ============================================================
+   Formulaire encaissement
+   ============================================================ */
 function FormulaireEncaissement({
   reservations,
   onDone,
@@ -244,6 +269,9 @@ function FormulaireEncaissement({
   );
 }
 
+/* ============================================================
+   Formulaire bilan
+   ============================================================ */
 function FormulaireBilan({ onDone }: { onDone: () => void }) {
   const supabase = createClient();
   const router = useRouter();
@@ -288,7 +316,7 @@ function FormulaireBilan({ onDone }: { onDone: () => void }) {
       .limit(1)
       .single();
 
-    const potCumulé = (dernierBilan?.solde_pot_commun ?? 0) + potCommun;
+    const potCumule = (dernierBilan?.solde_pot_commun ?? 0) + potCommun;
 
     await supabase.from('bilans_mensuels').upsert({
       mois: `${mois}-01`,
@@ -298,7 +326,7 @@ function FormulaireBilan({ onDone }: { onDone: () => void }) {
       remboursement_mis_de_cote: PRET_MENSUEL,
       remuneration_rhodes: REMUNERATION_ASSOCIE,
       remuneration_bomboma: REMUNERATION_ASSOCIE,
-      solde_pot_commun: potCumulé,
+      solde_pot_commun: potCumule,
       created_by: user.id,
     }, { onConflict: 'mois' });
 
@@ -340,7 +368,7 @@ function FormulaireBilan({ onDone }: { onDone: () => void }) {
           </div>
           <div className="text-xs text-muted space-y-1">
             <p>Remboursement prêt : {formatFCFA(PRET_MENSUEL)}</p>
-            <p>Rémunération × 2 : {formatFCFA(REMUNERATION_ASSOCIE * 2)}</p>
+            <p>Rémunération x 2 : {formatFCFA(REMUNERATION_ASSOCIE * 2)}</p>
           </div>
           <div className="flex gap-2">
             <button type="button" onClick={onDone} className="flex-1 py-2.5 border border-border rounded-xl text-sm font-medium">Annuler</button>
@@ -355,6 +383,9 @@ function FormulaireBilan({ onDone }: { onDone: () => void }) {
   );
 }
 
+/* ============================================================
+   Liste des dépenses
+   ============================================================ */
 function ListeDepenses({ depenses }: { depenses: Depense[] }) {
   if (depenses.length === 0) return <p className="text-center text-muted py-6">Aucune dépense</p>;
   return (
@@ -379,6 +410,9 @@ function ListeDepenses({ depenses }: { depenses: Depense[] }) {
   );
 }
 
+/* ============================================================
+   Liste des encaissements
+   ============================================================ */
 function ListeEncaissements({ encaissements }: { encaissements: Encaissement[] }) {
   if (encaissements.length === 0) return <p className="text-center text-muted py-6">Aucun encaissement</p>;
   return (
@@ -396,15 +430,21 @@ function ListeEncaissements({ encaissements }: { encaissements: Encaissement[] }
   );
 }
 
+/* ============================================================
+   Liste des bilans — avec bouton Export PDF (Amélioration 3)
+   ============================================================ */
 function ListeBilans({ bilans }: { bilans: BilanMensuel[] }) {
   if (bilans.length === 0) return <p className="text-center text-muted py-6">Aucun bilan généré</p>;
   return (
     <div className="space-y-3">
       {bilans.map((b) => (
         <div key={b.id} className="bg-card rounded-2xl p-5 border border-border space-y-3">
-          <h3 className="font-semibold">
-            {new Date(b.mois).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}
-          </h3>
+          <div className="flex justify-between items-center">
+            <h3 className="font-semibold">
+              {new Date(b.mois).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}
+            </h3>
+            <BoutonExportPDF bilan={b} />
+          </div>
           <div className="grid grid-cols-2 gap-2 text-sm">
             <div><span className="text-muted">CA total :</span> <span className="font-medium">{formatFCFA(b.ca_total)}</span></div>
             <div><span className="text-muted">Charges :</span> <span className="font-medium">{formatFCFA(b.charges_total)}</span></div>
@@ -417,6 +457,98 @@ function ListeBilans({ bilans }: { bilans: BilanMensuel[] }) {
             <span className="text-muted text-sm">Pot commun cumulé :</span>{' '}
             <span className="font-bold text-primary">{formatFCFA(b.solde_pot_commun)}</span>
           </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   Onglet Cautions (Amélioration 4)
+   ============================================================ */
+interface CautionRow {
+  id: string;
+  locataire_nom: string;
+  logement: string;
+  caution_montant: number;
+  caution_encaissee: boolean;
+  caution_restituee: boolean;
+  date_restitution: string | null;
+  date_arrivee: string;
+}
+
+function ListeCautions({ cautions }: { cautions: CautionRow[] }) {
+  const supabase = createClient();
+  const router = useRouter();
+  const [loading, setLoading] = useState<string | null>(null);
+
+  const totalDetenues = cautions
+    .filter((c) => !c.caution_restituee)
+    .reduce((s, c) => s + c.caution_montant, 0);
+
+  const totalRestituees = cautions
+    .filter((c) => c.caution_restituee)
+    .reduce((s, c) => s + c.caution_montant, 0);
+
+  async function marquerRestituee(id: string) {
+    setLoading(id);
+    await supabase.from('reservations').update({
+      caution_restituee: true,
+      date_restitution: formatDateISO(new Date()),
+    }).eq('id', id);
+    setLoading(null);
+    router.refresh();
+  }
+
+  if (cautions.length === 0) {
+    return <p className="text-center text-muted py-6">Aucune caution encaissée</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Résumé */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-orange-50 rounded-2xl p-4 border border-orange-200">
+          <p className="text-xs text-muted mb-1">Cautions détenues</p>
+          <p className="text-lg font-bold text-warning">{formatFCFA(totalDetenues)}</p>
+        </div>
+        <div className="bg-green-50 rounded-2xl p-4 border border-green-200">
+          <p className="text-xs text-muted mb-1">Cautions restituées</p>
+          <p className="text-lg font-bold text-success">{formatFCFA(totalRestituees)}</p>
+        </div>
+      </div>
+
+      {/* Liste */}
+      {cautions.map((c) => (
+        <div key={c.id} className="bg-card rounded-xl p-4 border border-border">
+          <div className="flex justify-between items-start gap-3">
+            <div className="min-w-0">
+              <p className="font-semibold truncate">{c.locataire_nom}</p>
+              <p className="text-xs text-muted">{c.logement} — Arrivée {formatDate(c.date_arrivee)}</p>
+            </div>
+            <div className="text-right shrink-0">
+              <p className="font-bold">{formatFCFA(c.caution_montant)}</p>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                c.caution_restituee ? 'bg-green-100 text-green-800' : 'bg-orange-100 text-orange-800'
+              }`}>
+                {c.caution_restituee ? 'Restituée' : 'Détenue'}
+              </span>
+            </div>
+          </div>
+
+          {c.caution_restituee && c.date_restitution && (
+            <p className="text-xs text-muted mt-2">Restituée le {formatDate(c.date_restitution)}</p>
+          )}
+
+          {!c.caution_restituee && (
+            <button
+              onClick={() => marquerRestituee(c.id)}
+              disabled={loading === c.id}
+              className="mt-3 w-full py-2 border border-success text-success rounded-xl text-xs font-semibold hover:bg-green-50 transition-colors disabled:opacity-50"
+            >
+              {loading === c.id ? 'Mise à jour...' : 'Marquer comme restituée'}
+            </button>
+          )}
         </div>
       ))}
     </div>
