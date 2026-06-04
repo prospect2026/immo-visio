@@ -1,8 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { useRouter } from 'next/navigation';
 import type { Message } from '@/types/database';
 
 function formatHeure(date: string) {
@@ -32,52 +31,153 @@ export function MessagerieClient({
   const [messages, setMessages] = useState(initial);
   const [contenu, setContenu] = useState('');
   const [sending, setSending] = useState(false);
+  const [enLigne, setEnLigne] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const supabase = createClient();
-  const router = useRouter();
+  const prevCountRef = useRef(initial.length);
+  const supabaseRef = useRef(createClient());
 
+  // Scroll vers le bas quand de nouveaux messages arrivent
+  const scrollEnBas = useCallback(() => {
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    });
+  }, []);
+
+  // Scroll initial au montage
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages]);
+  }, []);
 
+  // Scroll auto quand le nombre de messages change
   useEffect(() => {
+    if (messages.length > prevCountRef.current) {
+      scrollEnBas();
+    }
+    prevCountRef.current = messages.length;
+  }, [messages.length, scrollEnBas]);
+
+  // Marquer les messages de l'autre comme lus
+  const marquerLus = useCallback(async (msgs: Message[]) => {
+    const supabase = supabaseRef.current;
+    const nonLus = msgs.filter((m) => m.auteur_id !== userId && !m.lu_par_destinataire);
+    if (nonLus.length > 0) {
+      const ids = nonLus.map((m) => m.id);
+      await supabase.from('messages').update({ lu_par_destinataire: true }).in('id', ids);
+    }
+  }, [userId]);
+
+  // Fetch les messages depuis Supabase
+  const fetchMessages = useCallback(async () => {
+    const supabase = supabaseRef.current;
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .order('created_at', { ascending: true });
+
+    if (error || !data) {
+      setEnLigne(false);
+      return;
+    }
+
+    setEnLigne(true);
+
+    // Mettre à jour seulement s'il y a du nouveau (comparaison par nombre + dernier id)
+    setMessages((prev) => {
+      if (data.length !== prev.length || (data.length > 0 && prev.length > 0 && data[data.length - 1].id !== prev[prev.length - 1].id)) {
+        marquerLus(data);
+        return data;
+      }
+      return prev;
+    });
+  }, [marquerLus]);
+
+  // Realtime Supabase — tentative de connexion, agit en complément du polling
+  useEffect(() => {
+    const supabase = supabaseRef.current;
     const channel = supabase
       .channel('messages-realtime')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
         const newMsg = payload.new as Message;
-        setMessages((prev) => [...prev, newMsg]);
+        setMessages((prev) => {
+          // Éviter les doublons (le message optimiste ou le poll pourrait l'avoir déjà ajouté)
+          if (prev.some((m) => m.id === newMsg.id)) return prev;
+          return [...prev, newMsg];
+        });
         if (newMsg.auteur_id !== userId) {
           supabase.from('messages').update({ lu_par_destinataire: true }).eq('id', newMsg.id).then();
         }
       })
-      .subscribe();
+      .subscribe((status) => {
+        setEnLigne(status === 'SUBSCRIBED');
+      });
 
     return () => { supabase.removeChannel(channel); };
-  }, [supabase, userId]);
+  }, [userId]);
 
+  // Polling toutes les 3 secondes — filet de sécurité si le Realtime ne fonctionne pas
+  useEffect(() => {
+    const interval = setInterval(fetchMessages, 3000);
+    return () => clearInterval(interval);
+  }, [fetchMessages]);
+
+  // Envoi de message avec insertion optimiste
   async function envoyer(e: React.FormEvent) {
     e.preventDefault();
-    if (!contenu.trim()) return;
+    const texte = contenu.trim();
+    if (!texte) return;
     setSending(true);
-
-    await supabase.from('messages').insert({
-      auteur_id: userId,
-      contenu: contenu.trim(),
-    });
-
     setContenu('');
+
+    // Message optimiste — apparaît instantanément
+    const msgOptimiste: Message = {
+      id: `optimistic-${Date.now()}`,
+      auteur_id: userId,
+      contenu: texte,
+      lu_par_destinataire: false,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, msgOptimiste]);
+
+    // Insert en base
+    const supabase = supabaseRef.current;
+    const { data } = await supabase
+      .from('messages')
+      .insert({ auteur_id: userId, contenu: texte })
+      .select()
+      .single();
+
+    // Remplacer le message optimiste par le vrai message retourné par Supabase
+    if (data) {
+      setMessages((prev) =>
+        prev.map((m) => m.id === msgOptimiste.id ? data : m)
+      );
+    }
+
     setSending(false);
   }
 
+  // Variable pour les séparateurs de date dans le rendu
   let dernierJour = '';
 
   return (
     <>
+      {/* En-tête avec indicateur en ligne */}
       <div className="bg-card border-b border-border px-4 py-3 shrink-0">
-        <h1 className="text-lg font-bold text-primary">Messages</h1>
-        <p className="text-xs text-muted">Conversation RHODES — BOMBOMA</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-bold text-primary">Messages</h1>
+            <p className="text-xs text-muted">Conversation RHODES — BOMBOMA</p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className={`w-2 h-2 rounded-full ${enLigne ? 'bg-green-500' : 'bg-gray-300'}`} />
+            <span className={`text-[10px] font-medium ${enLigne ? 'text-green-600' : 'text-muted'}`}>
+              {enLigne ? 'En ligne' : 'Reconnexion...'}
+            </span>
+          </div>
+        </div>
       </div>
 
+      {/* Zone des messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-2 bg-background">
         {messages.length === 0 && (
           <p className="text-center text-muted py-12">Aucun message. Commencez la conversation !</p>
@@ -90,6 +190,7 @@ export function MessagerieClient({
             dernierJour = jour;
             showDateSep = true;
           }
+          const estOptimiste = msg.id.startsWith('optimistic-');
 
           return (
             <div key={msg.id}>
@@ -103,7 +204,7 @@ export function MessagerieClient({
                   estMoi
                     ? 'bg-primary text-white rounded-br-md'
                     : 'bg-card border border-border rounded-bl-md'
-                }`}>
+                } ${estOptimiste ? 'opacity-70' : ''}`}>
                   {!estMoi && (
                     <p className="text-[10px] font-bold text-primary mb-0.5">
                       {getNom(userEmail) === 'RHODES' ? 'BOMBOMA' : 'RHODES'}
@@ -111,7 +212,7 @@ export function MessagerieClient({
                   )}
                   <p className="text-sm whitespace-pre-wrap break-words">{msg.contenu}</p>
                   <p className={`text-[10px] mt-1 ${estMoi ? 'text-white/60' : 'text-muted'}`}>
-                    {formatHeure(msg.created_at)}
+                    {estOptimiste ? 'Envoi...' : formatHeure(msg.created_at)}
                   </p>
                 </div>
               </div>
@@ -120,6 +221,7 @@ export function MessagerieClient({
         })}
       </div>
 
+      {/* Zone de saisie */}
       <form onSubmit={envoyer} className="bg-card border-t border-border px-4 py-3 flex gap-2 shrink-0">
         <input
           type="text"
